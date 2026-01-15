@@ -18,7 +18,7 @@ import type {
     PlaceholderElement,
 } from '@/types';
 import { AVERY_5163 } from '@/lib/templates';
-import { getEffectiveElements } from '@/lib/masterOverride';
+import { getEffectiveElements, createElementOverride } from '@/lib/masterOverride';
 
 // ============================================================================
 // State Interface
@@ -52,6 +52,7 @@ export interface DesignStore {
     setLabelOverride: (labelIndex: number, override: LabelOverride) => void;
     removeLabelOverride: (labelIndex: number) => void;
     clearAllOverrides: () => void;
+    updateLabelElement: (labelIndex: number, elementId: string, updates: Partial<DesignElement>) => void;
 
     // Selection
     selectedLabelIndex: number | null;
@@ -139,8 +140,13 @@ const storeCreator = (set: (partial: Partial<DesignStore> | ((state: DesignStore
 
     // Preview page navigation
     setPreviewPageIndex: (index) => {
-        set({ previewPageIndex: Math.max(0, index) });
-            },
+        set((state: DesignStore) => ({
+            previewPageIndex: Math.max(0, index),
+            // Clear label selection when changing pages to avoid editing wrong label
+            selectedLabelIndex: null,
+            selectedElementIds: [],
+        }));
+    },
 
             // Master label actions
             setMasterLabel: (masterLabel) => {
@@ -206,6 +212,36 @@ const storeCreator = (set: (partial: Partial<DesignStore> | ((state: DesignStore
 
             clearAllOverrides: () => {
                 set({ labelOverrides: new Map() });
+            },
+
+            updateLabelElement: (labelIndex: number, elementId: string, updates: Partial<DesignElement>) => {
+                set((state: DesignStore) => {
+                    const existingOverride = state.labelOverrides.get(labelIndex);
+                    
+                    // Check if element is only in additionalElements (not in master)
+                    const isInMaster = state.masterLabel.elements.some(el => el.id === elementId);
+                    const isInAdditional = existingOverride?.additionalElements.some(el => el.id === elementId);
+                    
+                    if (!isInMaster && isInAdditional && existingOverride) {
+                        // Element is only in additionalElements - update it directly
+                        const updatedAdditional = existingOverride.additionalElements.map(el => 
+                            el.id === elementId ? { ...el, ...updates } as DesignElement : el
+                        );
+                        const newOverride: LabelOverride = {
+                            ...existingOverride,
+                            additionalElements: updatedAdditional,
+                        };
+                        const newOverrides = new Map(state.labelOverrides);
+                        newOverrides.set(labelIndex, newOverride);
+                        return { labelOverrides: newOverrides };
+                    } else {
+                        // Element is in master (or will be) - use normal override mechanism
+                        const newOverride = createElementOverride(labelIndex, elementId, updates, existingOverride);
+                        const newOverrides = new Map(state.labelOverrides);
+                        newOverrides.set(labelIndex, newOverride);
+                        return { labelOverrides: newOverrides };
+                    }
+                });
             },
 
             // Selection actions

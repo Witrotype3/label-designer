@@ -3,7 +3,7 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { useDesignStore } from '@/store/designStore';
 import { mmToPx, SCREEN_DPI } from '@/lib/dimensions';
-import { getLabelPosition } from '@/lib/templates';
+import { getLabelPosition, getLabelClipRect } from '@/lib/templates';
 import type { DesignElement, TextElement, ShapeElement, ImageElement, PlaceholderElement, LabelTemplate, MasterLabel } from '@/types';
 import { getAllAssets, getAsset, getAssetDataUrl, initializeAssets } from '@/lib/assets';
 import QRCode from 'qrcode';
@@ -41,6 +41,7 @@ export default function CanvasRenderer() {
         labelOverrides,
         masterLabel,
         updateMasterElement,
+        updateLabelElement,
         viewMode,
         previewPageIndex,
     } = useDesignStore();
@@ -159,6 +160,7 @@ export default function CanvasRenderer() {
             const physicalY = (canvasY - panY) / zoom;
 
             const totalLabels = getTotalLabels();
+            // Calculate absolute label index: pageIndex * labelsPerPage + labelIndexOnPage
             for (let i = 0; i < totalLabels; i++) {
                 const position = getLabelPosition(template, i);
                 if (!position) continue;
@@ -175,14 +177,17 @@ export default function CanvasRenderer() {
                     physicalY >= labelY &&
                     physicalY <= labelY + labelHeight
                 ) {
-                    clickedLabelIndex = i;
+                    // Calculate absolute label index across all pages
+                    const absoluteLabelIndex = previewPageIndex * labelsPerPage + i;
+                    clickedLabelIndex = absoluteLabelIndex;
 
                     // Convert to label-relative coordinates
                     const labelRelativeX = physicalX - labelX;
                     const labelRelativeY = physicalY - labelY;
 
                     // Check which element was clicked (elements are sorted by zIndex ascending, so check from end)
-                    const elements = getEffectiveElementsForLabel(i);
+                    // Use absolute label index to get correct overrides
+                    const elements = getEffectiveElementsForLabel(absoluteLabelIndex);
                     for (let j = elements.length - 1; j >= 0; j--) {
                         const element = elements[j];
                         if (!element.visible) continue;
@@ -208,14 +213,29 @@ export default function CanvasRenderer() {
         }
 
         // Update selection
-        if (clickedElementId) {
-            setSelectedElements([clickedElementId]);
-        } else {
-            setSelectedElements([]);
-        }
-
+        // Always set label index first if we found one, even if no element was clicked
         if (clickedLabelIndex !== null) {
             setSelectedLabel(clickedLabelIndex);
+        }
+        
+        if (clickedElementId) {
+            setSelectedElements([clickedElementId]);
+            // Ensure label index is set when element is selected
+            if (clickedLabelIndex === null && viewMode === 'PREVIEW') {
+                // If we clicked an element but didn't set label index, try to find which label it belongs to
+                // This shouldn't happen, but add as safety
+                const totalLabels = getTotalLabels();
+                for (let i = 0; i < totalLabels; i++) {
+                    const absoluteLabelIndex = previewPageIndex * labelsPerPage + i;
+                    const elements = getEffectiveElementsForLabel(absoluteLabelIndex);
+                    if (elements.some(el => el.id === clickedElementId)) {
+                        setSelectedLabel(absoluteLabelIndex);
+                        break;
+                    }
+                }
+            }
+        } else {
+            setSelectedElements([]);
         }
     }, [
         isPanning,
@@ -228,6 +248,8 @@ export default function CanvasRenderer() {
         getEffectiveElementsForLabel,
         setSelectedElements,
         setSelectedLabel,
+        previewPageIndex,
+        labelsPerPage,
     ]);
 
     // Handle mouse down for panning or moving
@@ -447,16 +469,19 @@ export default function CanvasRenderer() {
             // Render all labels - each label uses a different data row based on page
             const totalLabels = getTotalLabels();
             for (let i = 0; i < totalLabels; i++) {
+                // Calculate absolute label index across all pages (for override lookup)
+                const absoluteLabelIndex = previewPageIndex * labelsPerPage + i;
                 // Calculate which row this label should use
-                const rowIndex = previewPageIndex * labelsPerPage + i;
+                const rowIndex = absoluteLabelIndex;
                 const labelRowData = rowIndex < rows.length ? rows[rowIndex] : undefined;
-                renderLabel(ctx, i, labelRowData);
+                // Pass both sheet-relative index (i) for position/clipping and absolute index for overrides
+                renderLabel(ctx, i, labelRowData, absoluteLabelIndex);
             }
         }
 
         // Restore context
         ctx.restore();
-    }, [template, zoom, panX, panY, getTotalLabels, selectedLabelIndex, labelOverrides, selectedElementIds, masterLabel, resizeTrigger, viewMode, rows, activeRowIndex]);
+    }, [template, zoom, panX, panY, getTotalLabels, selectedLabelIndex, labelOverrides, selectedElementIds, masterLabel, resizeTrigger, viewMode, rows, activeRowIndex, previewPageIndex, labelsPerPage, getEffectiveElementsForLabel]);
 
     // Handle container resize
     useEffect(() => {
@@ -501,7 +526,9 @@ export default function CanvasRenderer() {
 
 
 
-    const renderLabel = (ctx: CanvasRenderingContext2D, labelIndex: number, rowData?: DataRow) => {
+    const renderLabel = (ctx: CanvasRenderingContext2D, labelIndex: number, rowData?: DataRow, absoluteLabelIndex?: number) => {
+        // labelIndex is sheet-relative (0 to labelsPerPage-1) for position/clipping
+        // absoluteLabelIndex is across all pages (for override lookup)
         const position = getLabelPosition(template, labelIndex);
         if (!position) return;
 
@@ -510,13 +537,16 @@ export default function CanvasRenderer() {
         const width = mmToPx(template.labelWidth, SCREEN_DPI);
         const height = mmToPx(template.labelHeight, SCREEN_DPI);
 
+        // Use absolute label index for override lookup if provided, otherwise use sheet-relative index
+        const overrideLabelIndex = absoluteLabelIndex !== undefined ? absoluteLabelIndex : labelIndex;
+
         // Draw label background
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(x, y, width, height);
 
         // Draw label border
-        const isSelected = selectedLabelIndex === labelIndex;
-        const hasOverride = labelOverrides.has(labelIndex);
+        const isSelected = selectedLabelIndex === overrideLabelIndex;
+        const hasOverride = labelOverrides.has(overrideLabelIndex);
 
         if (isSelected) {
             ctx.strokeStyle = '#2563eb';
@@ -538,9 +568,27 @@ export default function CanvasRenderer() {
             ctx.fill();
         }
 
-        // Render elements
-        const elements = getEffectiveElementsForLabel(labelIndex);
+        // Render elements - use absolute label index for override lookup
+        const elements = getEffectiveElementsForLabel(overrideLabelIndex);
         ctx.save();
+        
+        // Apply smart clipping in PREVIEW mode only - use sheet-relative index for position
+        if (viewMode === 'PREVIEW') {
+            const clipRect = getLabelClipRect(template, labelIndex);
+            if (clipRect) {
+                // Convert clip rect from mm to pixels
+                const clipX = mmToPx(clipRect.x, SCREEN_DPI);
+                const clipY = mmToPx(clipRect.y, SCREEN_DPI);
+                const clipWidth = mmToPx(clipRect.width, SCREEN_DPI);
+                const clipHeight = mmToPx(clipRect.height, SCREEN_DPI);
+                
+                // Set clipping path
+                ctx.beginPath();
+                ctx.rect(clipX, clipY, clipWidth, clipHeight);
+                ctx.clip();
+            }
+        }
+        
         ctx.translate(x, y);
 
         for (const element of elements) {
@@ -1101,6 +1149,8 @@ export default function CanvasRenderer() {
                         panY={panY}
                         viewMode={viewMode}
                         updateMasterElement={updateMasterElement}
+                        updateLabelElement={updateLabelElement}
+                        getEffectiveElementsForLabel={getEffectiveElementsForLabel}
                     />
                 )}
             </div>
@@ -1129,7 +1179,9 @@ function RenderTransformControls({
     panX,
     panY,
     viewMode,
-    updateMasterElement
+    updateMasterElement,
+    updateLabelElement,
+    getEffectiveElementsForLabel
 }: {
     selectedId: string;
     masterLabel: MasterLabel;
@@ -1140,8 +1192,19 @@ function RenderTransformControls({
     panY: number;
     viewMode: 'TEMPLATE' | 'PREVIEW';
     updateMasterElement: (elementId: string, updates: Partial<DesignElement>) => void;
+    updateLabelElement: (labelIndex: number, elementId: string, updates: Partial<DesignElement>) => void;
+    getEffectiveElementsForLabel: (labelIndex: number) => DesignElement[];
 }) {
-    const element = masterLabel.elements.find((el: DesignElement) => el.id === selectedId);
+    // Get the effective element (with overrides applied) when in preview mode with label selected
+    // Otherwise, get from master label
+    let element: DesignElement | undefined;
+    if (viewMode === 'PREVIEW' && selectedLabelIndex !== null) {
+        const effectiveElements = getEffectiveElementsForLabel(selectedLabelIndex);
+        element = effectiveElements.find(el => el.id === selectedId);
+    } else {
+        element = masterLabel.elements.find((el: DesignElement) => el.id === selectedId);
+    }
+    
     if (!element) return null;
 
     let containerOffset: { x: number; y: number };
@@ -1171,6 +1234,16 @@ function RenderTransformControls({
         containerOffset = labelPos;
     }
 
+    const handleUpdate = (updates: Partial<DesignElement>) => {
+        if (viewMode === 'PREVIEW' && selectedLabelIndex !== null) {
+            // In preview mode with label selected, update label-specific override
+            updateLabelElement(selectedLabelIndex, element.id, updates);
+        } else {
+            // In template mode, update master label
+            updateMasterElement(element.id, updates);
+        }
+    };
+
     return (
         <TransformControls
             element={element}
@@ -1179,7 +1252,7 @@ function RenderTransformControls({
             panY={panY}
             dpi={SCREEN_DPI}
             containerOffset={containerOffset}
-            onUpdate={(updates) => updateMasterElement(element.id, updates)}
+            onUpdate={handleUpdate}
         />
     );
 }

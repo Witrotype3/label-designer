@@ -336,3 +336,92 @@ export function getLabelPosition(
 export function getTotalLabels(template: LabelTemplate): number {
     return template.rows * template.columns;
 }
+
+/**
+ * Check if a label has an adjacent label on a specific side
+ */
+export function hasAdjacentLabel(
+    template: LabelTemplate,
+    labelIndex: number,
+    side: 'left' | 'right' | 'top' | 'bottom'
+): boolean {
+    const position = getLabelPosition(template, labelIndex);
+    if (!position) return false;
+
+    const { row, col } = position;
+
+    switch (side) {
+        case 'left':
+            return col > 0;
+        case 'right':
+            return col < template.columns - 1;
+        case 'top':
+            return row > 0;
+        case 'bottom':
+            return row < template.rows - 1;
+        default:
+            return false;
+    }
+}
+
+/**
+ * Get the clipping rectangle for a label based on adjacent labels
+ * Returns null if no clipping is needed (all edges are free)
+ * 
+ * The clip rectangle allows overflow on edges without adjacent labels,
+ * and clips at label boundaries where adjacent labels exist.
+ */
+export function getLabelClipRect(
+    template: LabelTemplate,
+    labelIndex: number
+): { x: number; y: number; width: number; height: number } | null {
+    const position = getLabelPosition(template, labelIndex);
+    if (!position) return null;
+
+    const hasLeft = hasAdjacentLabel(template, labelIndex, 'left');
+    const hasRight = hasAdjacentLabel(template, labelIndex, 'right');
+    const hasTop = hasAdjacentLabel(template, labelIndex, 'top');
+    const hasBottom = hasAdjacentLabel(template, labelIndex, 'bottom');
+
+    // If all edges are free, no clipping needed
+    if (!hasLeft && !hasRight && !hasTop && !hasBottom) {
+        return null;
+    }
+
+    // Calculate clip rectangle
+    // For edges with adjacent labels, clip at label boundary
+    // For edges without adjacent labels, extend clip area to allow overflow
+    const sheetWidth = template.sheetConfig.width;
+    const sheetHeight = template.sheetConfig.height;
+    
+    // Use a large extension value to allow overflow beyond sheet bounds
+    const overflowExtension = 1000; // mm
+    
+    // Calculate clip rectangle bounds
+    // Left edge: clip at label left if has left neighbor, otherwise allow overflow left
+    const labelLeft = position.x;
+    const clipX = hasLeft ? labelLeft : Math.max(0, labelLeft - overflowExtension);
+    
+    // Top edge: clip at label top if has top neighbor, otherwise allow overflow top
+    const labelTop = position.y;
+    const clipY = hasTop ? labelTop : Math.max(0, labelTop - overflowExtension);
+    
+    // Right edge: clip at label right if has right neighbor, otherwise allow overflow right
+    const labelRight = labelLeft + template.labelWidth;
+    const clipRight = hasRight ? labelRight : (sheetWidth + overflowExtension);
+    
+    // Bottom edge: clip at label bottom if has bottom neighbor, otherwise allow overflow bottom
+    const labelBottom = labelTop + template.labelHeight;
+    const clipBottom = hasBottom ? labelBottom : (sheetHeight + overflowExtension);
+    
+    // Calculate width and height from the bounds
+    const clipWidth = clipRight - clipX;
+    const clipHeight = clipBottom - clipY;
+
+    return {
+        x: clipX,
+        y: clipY,
+        width: clipWidth,
+        height: clipHeight,
+    };
+}

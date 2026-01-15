@@ -139,6 +139,7 @@ export default function Toolbar() {
                 template,
                 masterLabel,
                 rows,
+                labelOverrides,
                 filename: 'bulk-labels.pdf',
                 selectedRowIds: selectedRowIds.size > 0 ? selectedRowIds : undefined,
                 onProgress: (current: number, total: number) => {
@@ -167,6 +168,7 @@ export default function Toolbar() {
                 template,
                 masterLabel,
                 rows,
+                labelOverrides,
                 filename: 'selected-labels.pdf',
                 selectedRowIds,
                 onProgress: (current: number, total: number) => {
@@ -394,6 +396,23 @@ export default function Toolbar() {
                             icon: '📋',
                             onClick: handleLoadDesignClick,
                         },
+                        {
+                            divider: true,
+                            label: '',
+                            onClick: () => {},
+                        },
+                        {
+                            label: 'Export PDF',
+                            icon: '📄',
+                            onClick: handleExport,
+                        },
+                        ...(selectedRowIds.size > 0 ? [
+                            {
+                                label: `Export Selection (${selectedRowIds.size})`,
+                                icon: '📋',
+                                onClick: handleExportSelection,
+                            },
+                        ] : []),
                     ]}
                 />
 
@@ -485,25 +504,6 @@ export default function Toolbar() {
                                         }
                                     }
                                 },
-                            },
-                        ] : []),
-                    ]}
-                />
-
-                {/* Export Menu */}
-                <DropdownMenu
-                    label="Export"
-                    items={[
-                        {
-                            label: 'Export PDF',
-                            icon: '📄',
-                            onClick: handleExport,
-                        },
-                        ...(selectedRowIds.size > 0 ? [
-                            {
-                                label: `Export Selection (${selectedRowIds.size})`,
-                                icon: '📋',
-                                onClick: handleExportSelection,
                             },
                         ] : []),
                     ]}

@@ -5,6 +5,7 @@ import { useDesignStore } from '@/store/designStore';
 import type { DesignElement, TextElement, ShapeElement, PlaceholderElement, ElementBinding } from '@/types';
 import { getAllAssets, initializeAssets } from '@/lib/assets';
 import { useDataStore } from '@/store/dataStore';
+import { hideElement } from '@/lib/masterOverride';
 import Resizable from './Resizable';
 import ColorInput from './ColorInput';
 import DataBindingPanel from './DataBindingPanel';
@@ -98,7 +99,15 @@ export default function PropertyPanel() {
         updateMasterElement,
         removeMasterElement,
         clearSelection,
-        alignElementsToLabel
+        alignElementsToLabel,
+        viewMode,
+        selectedLabelIndex,
+        getEffectiveElementsForLabel,
+        updateLabelElement,
+        labelOverrides,
+        setLabelOverride,
+        previewPageIndex,
+        template
     } = useDesignStore();
     const { columns } = useDataStore();
     const [assets, setAssets] = useState<Array<{ id: string; name: string }>>([]);
@@ -132,9 +141,15 @@ export default function PropertyPanel() {
         );
     }
 
-    const selectedElement = masterLabel.elements.find(
-        el => el.id === selectedElementIds[0]
-    );
+    // Get the effective element (with overrides applied) when in preview mode with label selected
+    // Otherwise, get from master label
+    let selectedElement: DesignElement | undefined;
+    if (viewMode === 'PREVIEW' && selectedLabelIndex !== null) {
+        const effectiveElements = getEffectiveElementsForLabel(selectedLabelIndex);
+        selectedElement = effectiveElements.find(el => el.id === selectedElementIds[0]);
+    } else {
+        selectedElement = masterLabel.elements.find(el => el.id === selectedElementIds[0]);
+    }
 
     if (!selectedElement) {
         return (
@@ -149,7 +164,26 @@ export default function PropertyPanel() {
     }
 
     const handleUpdate = (updates: Partial<DesignElement>) => {
-        updateMasterElement(selectedElement.id, updates);
+        if (viewMode === 'PREVIEW' && selectedLabelIndex !== null) {
+            // Validate that selectedLabelIndex is reasonable (not from a previous page)
+            // This is a safeguard - the click handler should set it correctly, but this prevents editing wrong labels
+            const labelsPerPage = template.rows * template.columns;
+            const currentPageStartIndex = previewPageIndex * labelsPerPage;
+            const currentPageEndIndex = currentPageStartIndex + labelsPerPage - 1;
+            
+            // Only update if the selected label is on the current page
+            if (selectedLabelIndex >= currentPageStartIndex && selectedLabelIndex <= currentPageEndIndex) {
+                // In preview mode with label selected, update label-specific override
+                updateLabelElement(selectedLabelIndex, selectedElement.id, updates);
+            } else {
+                // Label index is from a different page - clear selection and don't update
+                console.warn(`Selected label index ${selectedLabelIndex} is not on current page ${previewPageIndex} (range: ${currentPageStartIndex}-${currentPageEndIndex}). Clearing selection.`);
+                clearSelection();
+            }
+        } else {
+            // In template mode, update master label
+            updateMasterElement(selectedElement.id, updates);
+        }
     };
 
     const handleBindingsChange = (bindings: ElementBinding[]) => {
@@ -159,8 +193,17 @@ export default function PropertyPanel() {
     };
 
     const handleDelete = () => {
-        removeMasterElement(selectedElement.id);
-        clearSelection();
+        if (viewMode === 'PREVIEW' && selectedLabelIndex !== null) {
+            // In preview mode with label selected, hide the element instead of deleting
+            const existingOverride = labelOverrides.get(selectedLabelIndex);
+            const newOverride = hideElement(selectedLabelIndex, selectedElement.id, existingOverride);
+            setLabelOverride(selectedLabelIndex, newOverride);
+            clearSelection();
+        } else {
+            // In template mode, delete from master
+            removeMasterElement(selectedElement.id);
+            clearSelection();
+        }
     };
 
     return (

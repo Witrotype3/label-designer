@@ -1,9 +1,10 @@
 import jsPDF from 'jspdf';
-import { LabelTemplate, MasterLabel, DesignElement, TextElement, ShapeElement, ImageElement, PlaceholderElement } from '@/types';
+import { LabelTemplate, MasterLabel, DesignElement, TextElement, ShapeElement, ImageElement, PlaceholderElement, LabelOverride } from '@/types';
 import { DataRow, useDataStore } from '@/store/dataStore';
 import { mmToPx, SCREEN_DPI } from '@/lib/dimensions';
-import { getLabelPosition } from '@/lib/templates';
+import { getLabelPosition, getLabelClipRect } from '@/lib/templates';
 import { getAllAssets, getAssetDataUrl, initializeAssets } from '@/lib/assets';
+import { getEffectiveElements } from '@/lib/masterOverride';
 import QRCode from 'qrcode';
 
 // Print DPI for high quality output
@@ -13,6 +14,7 @@ interface ExportOptions {
     template: LabelTemplate;
     masterLabel: MasterLabel;
     rows: DataRow[];
+    labelOverrides?: Map<number, LabelOverride>; // Optional: label-specific overrides
     filename?: string;
     selectedRowIds?: Set<string>; // Optional: filter to only selected rows
     onProgress?: (current: number, total: number) => void; // Progress callback
@@ -22,6 +24,7 @@ export const generateBulkPDF = async ({
     template,
     masterLabel,
     rows,
+    labelOverrides = new Map(),
     filename = 'labels.pdf',
     selectedRowIds,
     onProgress
@@ -96,8 +99,13 @@ export const generateBulkPDF = async ({
             const position = getLabelPosition(template, j);
             if (!position) continue;
 
+            // Calculate absolute label index across all pages
+            const absoluteLabelIndex = i + j;
+            
             // Render single label at position
-            await renderLabelToContext(ctx, template, masterLabel, rowData, position, scaleFactor);
+            // j is the sheet-relative label index (for position/clipping)
+            // absoluteLabelIndex is the absolute index across all pages (for override lookup)
+            await renderLabelToContext(ctx, template, masterLabel, rowData, position, scaleFactor, j, absoluteLabelIndex, labelOverrides);
             
             processedLabels++;
             // Report progress (by labels, not sheets)
@@ -128,17 +136,33 @@ const renderLabelToContext = async (
     masterLabel: MasterLabel,
     rowData: DataRow | any,
     position: { x: number, y: number },
-    scale: number
+    scale: number,
+    labelIndex: number, // Sheet-relative index for position/clipping
+    absoluteLabelIndex: number, // Absolute index across all pages for override lookup
+    labelOverrides: Map<number, LabelOverride>
 ) => {
     const labelX = position.x * scale;
     const labelY = position.y * scale;
     const labelW = template.labelWidth * scale;
     const labelH = template.labelHeight * scale;
 
-    // Don't clip to label area - allow content to extend beyond boundaries
-    // for printer tolerance (printers don't print perfectly aligned)
+    // Smart clipping: clip only when there's an adjacent label
     ctx.save();
-    // Removed clipping: ctx.clip() was here but removed to allow content overflow
+    
+    // Apply smart clipping based on adjacent labels
+    const clipRect = getLabelClipRect(template, labelIndex);
+    if (clipRect) {
+        // Convert clip rect from mm to pixels (already scaled)
+        const clipX = clipRect.x * scale;
+        const clipY = clipRect.y * scale;
+        const clipWidth = clipRect.width * scale;
+        const clipHeight = clipRect.height * scale;
+        
+        // Set clipping path
+        ctx.beginPath();
+        ctx.rect(clipX, clipY, clipWidth, clipHeight);
+        ctx.clip();
+    }
 
     // Draw background (if any in master, or white default)
     // masterLabel.backgroundColor is usually #ffffff or transparent
@@ -147,8 +171,14 @@ const renderLabelToContext = async (
         ctx.fillRect(labelX, labelY, labelW, labelH);
     }
 
-    // Render elements
-    for (const element of masterLabel.elements) {
+    // Get effective elements with overrides applied
+    const override = labelOverrides.get(absoluteLabelIndex);
+    const effectiveElements = getEffectiveElements(masterLabel, override);
+    
+    // Render elements - IMPORTANT: Sort by zIndex (ascending - lower zIndex renders first/behind)
+    const sortedElements = [...effectiveElements].sort((a, b) => a.zIndex - b.zIndex);
+    
+    for (const element of sortedElements) {
         if (!element.visible) continue;
 
         // Transform to label local coords -> canvas coords
